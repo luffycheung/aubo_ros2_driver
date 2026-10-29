@@ -3,6 +3,8 @@
 
 // System
 #include <array>
+#include <chrono>
+#include "servo_return_policy.h"
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
@@ -10,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 #include <limits>
 
@@ -20,7 +23,6 @@
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
-#include "hardware_interface/visibility_control.h"
 
 // ROS
 #include "rclcpp/macros.hpp"
@@ -29,12 +31,9 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
-#include <aubo_dashboard_msgs/msg/robot_mode.h>
-
 #include <aubo/robot/robot_state.h>
 #include "aubo_sdk/rtde.h"
 #include "aubo_sdk/rpc.h"
-#include "serviceinterface.h"
 
 using namespace arcs::common_interface;
 using namespace arcs::aubo_sdk;
@@ -82,8 +81,6 @@ public:
 
     void readActualQ();
 
-    void setInput(RtdeClientPtr cli);
-
     bool isServoModeStart();
 
     bool ServoModeStart();
@@ -100,6 +97,7 @@ public:
 
 private:
     void disconnectClients();
+    hardware_interface::return_type latchServoFault(const char *reason);
     bool connectRpcClient();
     bool connectRtdeClient();
     bool probeIoControlLayout();
@@ -122,7 +120,17 @@ private:
     double speed_scaling_combined_{ 1.0 };
     bool controllers_initialized_{ false };
     bool servo_mode_start_{ false };
+    bool servo_fault_latched_{ false };
+    bool servo_mode_pending_{ false };
+    std::chrono::steady_clock::time_point servo_mode_deadline_{};
+    ServoReturnPolicy servo_return_policy_;
+    std::chrono::steady_clock::time_point last_motion_feedback_{};
+    std::chrono::steady_clock::time_point last_servo_attempt_{};
+    std::chrono::steady_clock::time_point last_servo_report_{};
+    std::vector<double> servo_target_{std::vector<double>(6, 0.0)};
     int servo_mode_{ 1 };
+    double control_period_s_{0.005};
+    double servo_period_s_{0.01};
     bool initialized_{ false };
     bool motion_command_paused_{ false };
 

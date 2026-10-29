@@ -16,7 +16,10 @@ def _ensure_description_xacro(description_share: str, aubo_type: str) -> None:
     target = urdf_dir / f"{aubo_type}.urdf.xacro"
     source = urdf_dir / f"{aubo_type}.urdf"
 
-    if target.exists():
+    if aubo_type.endswith("_calibrated") and not source.is_file():
+        raise FileNotFoundError(f"Calibrated URDF missing: {source}. Generate it and rebuild aubo_description first.")
+
+    if target.exists() and (not source.exists() or target.stat().st_mtime >= source.stat().st_mtime):
         return
 
     if not source.exists():
@@ -40,7 +43,12 @@ def launch_setup(context, *args, **kwargs):
         context
     )
     description_file = LaunchConfiguration("description_file").perform(context)
-    aubo_type = LaunchConfiguration("aubo_type")
+    aubo_type = LaunchConfiguration("aubo_type").perform(context)
+    use_calibrated = LaunchConfiguration("use_calibrated").perform(context).lower()
+    if use_calibrated not in ("true", "false"):
+        raise ValueError("use_calibrated must be true or false")
+    if use_calibrated == "true":
+        aubo_type += "_calibrated"
     launch_rviz = LaunchConfiguration("launch_rviz")
     moveit_config_file = LaunchConfiguration("moveit_config_file").perform(context)
     if not moveit_config_file:
@@ -48,7 +56,7 @@ def launch_setup(context, *args, **kwargs):
 
     description_share = get_package_share_directory(description_package)
     moveit_share = get_package_share_directory(moveit_config_package)
-    _ensure_description_xacro(description_share, aubo_type.perform(context))
+    _ensure_description_xacro(description_share, aubo_type)
 
     moveit_config = (
         MoveItConfigsBuilder("aubo", package_name=moveit_config_package)
@@ -150,6 +158,10 @@ def generate_launch_description():
                 "description_file",
                 default_value="aubo_ros2.xacro",
                 description="Robot description xacro file name.",
+            ),
+            DeclareLaunchArgument(
+                "use_calibrated", default_value="false",
+                description="Load the calibrated URDF; fail if missing.",
             ),
             DeclareLaunchArgument(
                 "aubo_type",

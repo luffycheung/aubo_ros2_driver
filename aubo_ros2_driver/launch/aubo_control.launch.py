@@ -1,10 +1,14 @@
 from pathlib import Path
+import tempfile
+import yaml
+from aubo_ros2_driver.control_profile import resolve_update_rate, resolve_servo_period
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, TimerAction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, TimerAction, EmitEvent, LogInfo
 from launch.conditions import IfCondition, UnlessCondition
-from launch.event_handlers import OnProcessStart
+from launch.event_handlers import OnProcessStart, OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import (
     Command,
     FindExecutable,
@@ -19,7 +23,10 @@ def _ensure_description_xacro(description_share: str, aubo_type: str) -> None:
     target = urdf_dir / f"{aubo_type}.urdf.xacro"
     source = urdf_dir / f"{aubo_type}.urdf"
 
-    if target.exists():
+    if aubo_type.endswith("_calibrated") and not source.is_file():
+        raise FileNotFoundError(f"Calibrated URDF missing: {source}. Generate it and rebuild aubo_description first.")
+
+    if target.exists() and (not source.exists() or target.stat().st_mtime >= source.stat().st_mtime):
         return
 
     if not source.exists():
@@ -50,13 +57,31 @@ def launch_setup(context, *args, **kwargs):
     servo_mode = LaunchConfiguration("servo_mode")
     dashboard_port = LaunchConfiguration("dashboard_port")
     dashboard_robot = LaunchConfiguration("dashboard_robot")
-    aubo_type = LaunchConfiguration("aubo_type")
+    aubo_type = LaunchConfiguration("aubo_type").perform(context)
+    use_calibrated = LaunchConfiguration("use_calibrated").perform(context).lower()
+    if use_calibrated not in ("true", "false"):
+        raise ValueError("use_calibrated must be true or false")
+    if use_calibrated == "true":
+        aubo_type += "_calibrated"
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
     launch_rviz = LaunchConfiguration("launch_rviz")
 
     description_package = description_package_cfg.perform(context)
     description_share = get_package_share_directory(description_package)
-    _ensure_description_xacro(description_share, aubo_type.perform(context))
+    _ensure_description_xacro(description_share, aubo_type)
+
+    controller_path = Path(get_package_share_directory(runtime_config_package.perform(context))) / "config" / controllers_file.perform(context)
+    config = yaml.safe_load(controller_path.read_text())
+    rate = resolve_update_rate(aubo_type,
+        LaunchConfiguration("controller_profile").perform(context),
+        LaunchConfiguration("update_rate").perform(context),
+        config["controller_manager"]["ros__parameters"]["update_rate"])
+    servo_period = resolve_servo_period(LaunchConfiguration("servo_period").perform(context), rate)
+    config["controller_manager"]["ros__parameters"]["update_rate"] = rate
+    # Rewrite the exact node-specific key; wildcard overrides lose to this YAML.
+    with tempfile.NamedTemporaryFile(mode="w", prefix="aubo_controllers_", suffix=".yaml", delete=False) as stream:
+        yaml.safe_dump(config, stream)
+        robot_controllers = stream.name
 
     robot_description_content = Command(
         [
@@ -78,6 +103,8 @@ def launch_setup(context, *args, **kwargs):
             " ",
             "servo_mode:=",
             servo_mode,
+            " control_period:=", str(1.0 / rate),
+            " servo_period:=", str(servo_period),
             " ",
             "aubo_type:=",
             aubo_type,
@@ -86,10 +113,6 @@ def launch_setup(context, *args, **kwargs):
         ]
     )
     robot_description = {"robot_description": robot_description_content}
-
-    robot_controllers = PathJoinSubstitution(
-        [get_package_share_directory(runtime_config_package.perform(context)), "config", controllers_file]
-    )
 
     rviz_config_file = PathJoinSubstitution(
         [get_package_share_directory(moveit_config_package.perform(context)), "config", "moveit.rviz"]
@@ -190,22 +213,25 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    delayed_controller_spawners = RegisterEventHandler(
-        OnProcessStart(
-            target_action=control_node,
-            on_start=[
-                TimerAction(
-                    period=2.0,
-                    actions=[
-                        joint_state_broadcaster_spawner,
-                        io_and_status_controller_spawner,
-                        freedrive_mode_controller_spawner,
-                        initial_joint_controller_spawner,
-                    ],
-                )
-            ],
-        )
-    )
+    # Load/configure auxiliary plugins before starting motion. Loading a plugin
+    # while Servo is live can block controller_manager's controller-list lock.
+    chain = [joint_state_broadcaster_spawner]
+    if use_fake_hardware.perform(context).lower() != "true":
+        chain += [io_and_status_controller_spawner, freedrive_mode_controller_spawner]
+    chain += [initial_joint_controller_spawner]
+    def continue_after_success(next_action):
+        def on_exit(event, context):
+            if event.returncode != 0:
+                return [LogInfo(msg="Controller spawner failed; motion startup aborted."),
+                        EmitEvent(event=Shutdown(reason="controller startup failed"))]
+            return [next_action]
+        return on_exit
+    spawner_chain = [RegisterEventHandler(OnProcessExit(
+        target_action=previous, on_exit=continue_after_success(next_action)))
+        for previous, next_action in zip(chain, chain[1:])]
+    delayed_controller_spawners = RegisterEventHandler(OnProcessStart(
+        target_action=control_node,
+        on_start=[TimerAction(period=2.0, actions=[chain[0]])]))
 
     return [
         control_node,
@@ -213,12 +239,21 @@ def launch_setup(context, *args, **kwargs):
         rviz_node,
         controller_stopper_node,
         dashboard_client_node,
+        *spawner_chain,
         delayed_controller_spawners,
     ]
 
 
 def generate_launch_description():
-    declared_arguments = []
+    declared_arguments = [DeclareLaunchArgument(
+        "update_rate", default_value="",
+        description="Explicit cyclic rate in Hz; overrides the controller profile."),
+        DeclareLaunchArgument("servo_period", default_value="0.01",
+            description="servoJoint t in seconds, or auto=1/update_rate; default .01 preserves existing profiles."),
+        DeclareLaunchArgument("controller_profile", default_value="auto",
+            description="auto: ES models 100Hz, others YAML; es:100Hz; legacy:200Hz; custom:YAML.")]
+
+
 
     declared_arguments.append(
         DeclareLaunchArgument(
@@ -227,6 +262,10 @@ def generate_launch_description():
             description='Package with the controller\'s configuration in "config" folder. \
         Usually the argument is not set, it enables use of a custom setup.',
         )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument("use_calibrated", default_value="false",
+                              description="Load the calibrated URDF; fail if missing.")
     )
     declared_arguments.append(
         DeclareLaunchArgument(
