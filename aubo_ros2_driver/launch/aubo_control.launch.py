@@ -3,7 +3,7 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, TimerAction
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessStart
 from launch.substitutions import (
     Command,
@@ -47,6 +47,9 @@ def launch_setup(context, *args, **kwargs):
     use_fake_hardware = LaunchConfiguration("use_fake_hardware")
     fake_sensor_commands = LaunchConfiguration("fake_sensor_commands")
     robot_ip = LaunchConfiguration("robot_ip")
+    servo_mode = LaunchConfiguration("servo_mode")
+    dashboard_port = LaunchConfiguration("dashboard_port")
+    dashboard_robot = LaunchConfiguration("dashboard_robot")
     aubo_type = LaunchConfiguration("aubo_type")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
     launch_rviz = LaunchConfiguration("launch_rviz")
@@ -73,6 +76,9 @@ def launch_setup(context, *args, **kwargs):
             "robot_ip:=",
             robot_ip,
             " ",
+            "servo_mode:=",
+            servo_mode,
+            " ",
             "aubo_type:=",
             aubo_type,
             " ",
@@ -89,6 +95,7 @@ def launch_setup(context, *args, **kwargs):
         [get_package_share_directory(moveit_config_package.perform(context)), "config", "moveit.rviz"]
     )
 
+    # Keep Jazzy-compatible standard ros2_control_node
     control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
@@ -123,6 +130,54 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
+    io_and_status_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        condition=UnlessCondition(use_fake_hardware),
+        arguments=[
+            "io_and_status_controller",
+            "--controller-manager",
+            "/controller_manager",
+            "--controller-manager-timeout",
+            "120",
+        ],
+    )
+
+    freedrive_mode_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        condition=UnlessCondition(use_fake_hardware),
+        arguments=[
+            "freedrive_mode_controller",
+            "--controller-manager",
+            "/controller_manager",
+            "--controller-manager-timeout",
+            "120",
+        ],
+    )
+
+    controller_stopper_node = Node(
+        package="aubo_ros2_driver",
+        executable="controller_stopper",
+        condition=UnlessCondition(use_fake_hardware),
+        output="both",
+    )
+
+    dashboard_client_node = Node(
+        package="aubo_ros2_driver",
+        executable="dashboard_client",
+        name="dashboard_client",
+        condition=UnlessCondition(use_fake_hardware),
+        output="both",
+        parameters=[
+            {
+                "robot_ip": robot_ip,
+                "port": dashboard_port,
+                "robot": dashboard_robot,
+            }
+        ],
+    )
+
     initial_joint_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
@@ -143,6 +198,8 @@ def launch_setup(context, *args, **kwargs):
                     period=2.0,
                     actions=[
                         joint_state_broadcaster_spawner,
+                        io_and_status_controller_spawner,
+                        freedrive_mode_controller_spawner,
                         initial_joint_controller_spawner,
                     ],
                 )
@@ -154,6 +211,8 @@ def launch_setup(context, *args, **kwargs):
         control_node,
         robot_state_publisher_node,
         rviz_node,
+        controller_stopper_node,
+        dashboard_client_node,
         delayed_controller_spawners,
     ]
 
@@ -227,6 +286,27 @@ def generate_launch_description():
             default_value="None",
             description="IP of robot computer. \
             Used only if 'use_fake_hardware' parameter is false.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "servo_mode",
+            default_value="1",
+            description="Servo mode select value passed to MotionControl.setServoModeSelect().",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "dashboard_port",
+            default_value="9012",
+            description="Dashboard / WebSocket JSON-RPC port for dashboard_client.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "dashboard_robot",
+            default_value="rob1",
+            description="Robot name prefix for dashboard_client JSON-RPC.",
         )
     )
     declared_arguments.append(
