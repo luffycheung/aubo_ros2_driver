@@ -56,3 +56,9 @@ bash ~/repos/aubo_ros2_driver/aubo_ros2_driver/scripts/check_aubo_rt.sh
 
 与上表「模式切换 SERVO/NORMAL/TEACH」不同：`aubo_control.launch.py` 的 `servo_mode:=N` / `aubo_diag.py sweep --servo-mode N` 对应 SDK `setServoModeSelect`（1–7）。
 本机假机频率矩阵与 200Hz 规划/透传差异见 develop-workflows：`env_deploy/arcs/LOCAL_DIAG.md`。
+
+## 相对 humble-servo-opt 的取舍（本分支）
+
+- **保留**：`892e816` 自动上电 / 解除防护 / setcap FIFO / remote RViz / `robot_ip` 默认 `127.0.0.1`；`f63f45d` 文档；Jazzy 侧 MoveIt OMPL（字符串数组 / `default_planning_*`）。
+- **排除**：`0bda7c0` Humble-only（`tryPublish`、`/opt/ros/humble`、`docs/HUMBLE_PORT.md`、controller_manager 扁平 include）；`09d2de8` 中把 README/OMPL/文档改回 Humble 的部分。
+- API：`realtime_tools` 保持 Jazzy `try_publish`；`controller_manager` 保持嵌套 include。
